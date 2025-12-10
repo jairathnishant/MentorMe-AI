@@ -1,0 +1,9 @@
+{
+  "name": "MentorMe AI",
+  "description": "An intelligent personal mentor app that analyzes your workflow, posture, and environment to provide actionable feedback for self-improvement.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ]
+}
