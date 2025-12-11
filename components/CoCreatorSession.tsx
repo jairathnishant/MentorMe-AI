@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Monitor, X, Zap, AlertTriangle, Eye, ArrowRight, AppWindow, Layout, Volume2, VolumeX, CheckCircle, Flame, Users } from 'lucide-react';
+import { Monitor, X, Zap, AlertTriangle, Eye, ArrowRight, AppWindow, Layout, Volume2, VolumeX, CheckCircle, Flame, Users, Mic, MicOff } from 'lucide-react';
 import { Button } from './Button';
 import { AnalysisPoint, SafetyStatus, Mentor } from '../types';
 import { analyzeFrame } from '../services/geminiService';
@@ -12,6 +12,12 @@ interface CoCreatorSessionProps {
 }
 
 const ANALYSIS_INTERVAL = 10000; // Analyze every 10 seconds for co-creation
+
+// Type definition for SpeechRecognition
+interface IWindow extends Window {
+  webkitSpeechRecognition: any;
+  SpeechRecognition: any;
+}
 
 export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, userLanguage, onClose }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -25,6 +31,11 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // STT State
+  const [isListening, setIsListening] = useState(false);
+  const [liveContext, setLiveContext] = useState<string>('');
+  const recognitionRef = useRef<any>(null);
 
   // Load Voices
   useEffect(() => {
@@ -40,6 +51,40 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
     
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
+
+  // Initialize Speech Rec
+  useEffect(() => {
+    const { webkitSpeechRecognition, SpeechRecognition } = window as unknown as IWindow;
+    const SpeechRecognitionAPI = SpeechRecognition || webkitSpeechRecognition;
+    
+    if (SpeechRecognitionAPI) {
+        const recognition = new SpeechRecognitionAPI();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = userLanguage === 'French' ? 'fr-FR' : userLanguage === 'Spanish' ? 'es-ES' : 'en-US';
+        
+        recognition.onstart = () => setIsListening(true);
+        recognition.onend = () => setIsListening(false);
+        recognition.onresult = (event: any) => {
+            const transcript = event.results[0][0].transcript;
+            setLiveContext(transcript);
+        };
+        recognition.onerror = (e: any) => {
+            console.error("Speech error", e);
+            setIsListening(false);
+        };
+        recognitionRef.current = recognition;
+    }
+    return () => {
+        if (recognitionRef.current) recognitionRef.current.abort();
+    };
+  }, [userLanguage]);
+
+  const toggleListening = () => {
+      if (!recognitionRef.current) return;
+      if (isListening) recognitionRef.current.stop();
+      else recognitionRef.current.start();
+  };
 
   // TTS Logic with Natural Voice Selection
   useEffect(() => {
@@ -164,7 +209,7 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
 
     try {
       setIsAnalyzing(true);
-      const point = await analyzeFrame(frame, mentor, userLanguage);
+      const point = await analyzeFrame(frame, mentor, userLanguage, liveContext);
       setIsAnalyzing(false);
       
       if (point.safetyStatus === SafetyStatus.UNSAFE) {
@@ -180,7 +225,7 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
       setIsAnalyzing(false);
       setCurrentSuggestion("Re-calibrating visual feed...");
     }
-  }, [captureFrame, mentor, userLanguage]);
+  }, [captureFrame, mentor, userLanguage, liveContext]);
 
   useEffect(() => {
     if (!isLive) return;
@@ -230,6 +275,14 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
             </div>
          </div>
          <div className="flex items-center space-x-2">
+            <button 
+                onClick={toggleListening}
+                className={`p-2 rounded-full border transition-colors ${isListening ? 'bg-red-500 text-white border-red-500 animate-pulse' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+                title="Voice Command"
+            >
+                {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+            </button>
+
             <button 
                 onClick={() => setIsVoiceEnabled(!isVoiceEnabled)}
                 className={`p-2 rounded-full border transition-colors ${isVoiceEnabled ? 'bg-primary/20 border-primary text-primary' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
@@ -294,10 +347,17 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
               </div>
           </div>
           
-          <div className="flex-1 overflow-hidden relative h-full flex items-center">
-             <div className="whitespace-nowrap animate-marquee text-lg text-white font-medium">
-                 {currentSuggestion}
-             </div>
+          <div className="flex-1 overflow-hidden relative h-full flex items-center bg-black/50">
+             {liveContext ? (
+                 <div className="absolute inset-0 flex items-center justify-center bg-primary/20 px-4 animate-fade-in z-20">
+                     <span className="text-white italic">You: "{liveContext}"</span>
+                     <button onClick={() => setLiveContext('')} className="ml-4 text-xs text-gray-300 underline">Clear Context</button>
+                 </div>
+             ) : (
+                <div className="whitespace-nowrap animate-marquee text-lg text-white font-medium pl-4">
+                    {currentSuggestion}
+                </div>
+             )}
           </div>
 
           <div className="flex-shrink-0 w-64 px-4 h-full bg-black/50 border-l border-gray-800 flex flex-col justify-center space-y-2 z-10 text-xs">

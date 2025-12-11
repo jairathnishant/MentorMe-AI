@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState } from 'react';
 import {  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { ArrowLeft, CheckCircle, Lightbulb, PlayCircle, Share2, Download, FileJson } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Lightbulb, PlayCircle, Share2, Download, FileJson, Link as LinkIcon, Check } from 'lucide-react';
 import { SessionReport } from '../types';
 import { Button } from './Button';
 import { getVideoBlob } from '../services/storage';
@@ -13,6 +13,7 @@ interface ReportViewProps {
 
 export const ReportView: React.FC<ReportViewProps> = ({ report, onBack }) => {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
 
   useEffect(() => {
     const loadVideo = async () => {
@@ -40,9 +41,12 @@ export const ReportView: React.FC<ReportViewProps> = ({ report, onBack }) => {
     lighting: point.lightingScore
   }));
 
-  const shareViaWhatsapp = () => {
-      const text = `Check out my MentorMe session report! Score: ${report.overallScore}/100. "${report.keyInsights[0]}"`;
-      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  const handleCopyLink = () => {
+      // Generate a deep link scheme that the app would intercept on mobile
+      const link = `mentorme://view/report/${report.id}`;
+      navigator.clipboard.writeText(link);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
   };
 
   const downloadAnalysis = () => {
@@ -76,8 +80,9 @@ export const ReportView: React.FC<ReportViewProps> = ({ report, onBack }) => {
             <Button variant="secondary" size="sm" onClick={downloadAnalysis}>
                 <FileJson className="w-4 h-4 mr-2" /> Download Analysis
             </Button>
-            <Button variant="secondary" size="sm" onClick={shareViaWhatsapp}>
-                <Share2 className="w-4 h-4 mr-2" /> WhatsApp
+            <Button variant="secondary" size="sm" onClick={handleCopyLink} className={isCopied ? "bg-green-500/20 text-green-500 border-green-500/50" : ""}>
+                {isCopied ? <Check className="w-4 h-4 mr-2" /> : <LinkIcon className="w-4 h-4 mr-2" />}
+                {isCopied ? "Link Copied" : "Copy Link"}
             </Button>
         </div>
       </div>

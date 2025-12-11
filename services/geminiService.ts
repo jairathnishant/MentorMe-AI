@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisPoint, SafetyStatus, Mentor } from "../types";
 
@@ -7,7 +8,7 @@ You must also strictly monitor for safety.
 If you detect ANY violence, self-harm, weapons, or explicit sexual content, you MUST flag the safetyStatus as UNSAFE immediately.
 `;
 
-export const analyzeFrame = async (base64Image: string, mentor: Mentor, language: string = 'English'): Promise<AnalysisPoint> => {
+export const analyzeFrame = async (base64Image: string, mentor: Mentor, language: string = 'English', userInstruction: string = ''): Promise<AnalysisPoint> => {
   if (!process.env.API_KEY) {
     throw new Error("API Key missing");
   }
@@ -25,13 +26,24 @@ export const analyzeFrame = async (base64Image: string, mentor: Mentor, language
     Specific Goals: ${mentor.goals}
     Language Requirement: Provide the 'suggestion' and any text output strictly in ${language} language.
 
-    Based on the ROLE and GOALS above:
+    ${userInstruction ? `
+    IMPORTANT - USER OVERRIDE INSTRUCTION: 
+    The user has just spoken this command: "${userInstruction}".
+    You MUST adjust your immediate focus and advice to address this specific request. 
+    Ignore previous goals if they conflict with this new instruction.
+    ` : ''}
+
+    Based on the ROLE, GOALS, and USER INSTRUCTION above:
     1. Evaluate the primary quality metric relevant to the role (e.g., Posture for health, Code Cleanliness for dev, Food Pacing for eating).
     2. Assess focus or engagement level.
     3. Evaluate environmental factors or screen clarity.
     4. List visible objects or code keywords relevant to the context (Translate to ${language}).
     5. Provide a short, actionable, single-sentence suggestion explicitly derived from the stated GOALS in ${language}.
+        - If the user gave an instruction, acknowledge it in the suggestion (e.g., "Understood, checking for...").
+        - If the user is doing well, acknowledge the improvement.
     6. Perform a safety check (SAFE or UNSAFE).
+    7. Identify "Good Points" (what they are doing right).
+    8. Identify "Improvements" (specific things to fix).
   `;
 
   try {
@@ -54,9 +66,11 @@ export const analyzeFrame = async (base64Image: string, mentor: Mentor, language
             lightingScore: { type: Type.INTEGER, description: "Environment/Clarity score (1-10)" },
             detectedObjects: { type: Type.ARRAY, items: { type: Type.STRING } },
             suggestion: { type: Type.STRING, description: `Actionable advice based on the specific mentor goals in ${language}` },
+            goodPoints: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of positive observations" },
+            improvements: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of areas to improve" },
             safetyStatus: { type: Type.STRING, enum: ["SAFE", "UNSAFE", "UNKNOWN"] }
           },
-          required: ["postureScore", "focusScore", "lightingScore", "safetyStatus", "suggestion"]
+          required: ["postureScore", "focusScore", "lightingScore", "safetyStatus", "suggestion", "goodPoints", "improvements"]
         }
       }
     });
@@ -70,6 +84,8 @@ export const analyzeFrame = async (base64Image: string, mentor: Mentor, language
       lightingScore: result.lightingScore || 5,
       detectedObjects: result.detectedObjects || [],
       suggestion: result.suggestion || "Processing...",
+      goodPoints: result.goodPoints || [],
+      improvements: result.improvements || [],
       safetyStatus: result.safetyStatus as SafetyStatus || SafetyStatus.UNKNOWN
     };
 
@@ -83,6 +99,8 @@ export const analyzeFrame = async (base64Image: string, mentor: Mentor, language
       lightingScore: 0,
       detectedObjects: [],
       suggestion: "Analysis momentarily unavailable.",
+      goodPoints: [],
+      improvements: [],
       safetyStatus: SafetyStatus.UNKNOWN
     };
   }

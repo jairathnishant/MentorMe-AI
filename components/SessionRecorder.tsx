@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Camera, StopCircle, Zap, AlertTriangle, Clock, Volume2, VolumeX } from 'lucide-react';
+import { Camera, StopCircle, Zap, AlertTriangle, Clock, Volume2, VolumeX, Mic, MicOff } from 'lucide-react';
 import { Button } from './Button';
 import { AnalysisPoint, SafetyStatus, SessionReport, Mentor } from '../types';
 import { analyzeFrame, generateFinalSummary } from '../services/geminiService';
@@ -18,6 +18,12 @@ interface SessionRecorderProps {
 const SESSION_DURATION = 10 * 60 * 1000; 
 // Analyze every 20 seconds
 const ANALYSIS_INTERVAL = 20000; 
+
+// Type definition for SpeechRecognition (since it's not standard in all TS lib configs)
+interface IWindow extends Window {
+  webkitSpeechRecognition: any;
+  SpeechRecognition: any;
+}
 
 export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId, userLanguage, onComplete, onCancel }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -38,6 +44,11 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(false);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
 
+  // Speech to Text (Live Context)
+  const [isListening, setIsListening] = useState(false);
+  const [liveContext, setLiveContext] = useState<string>('');
+  const recognitionRef = useRef<any>(null);
+
   // Load Voices
   useEffect(() => {
     const loadVoices = () => {
@@ -48,13 +59,12 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     };
     
     loadVoices();
-    // Chrome loads voices asynchronously
     window.speechSynthesis.onvoiceschanged = loadVoices;
     
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
-  // Initialize Camera
+  // Initialize Camera & Speech Recognition
   useEffect(() => {
     const initCamera = async () => {
       try {
@@ -69,13 +79,49 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     };
     initCamera();
 
+    // Init Speech Rec
+    const { webkitSpeechRecognition, SpeechRecognition } = window as unknown as IWindow;
+    const SpeechRecognitionAPI = SpeechRecognition || webkitSpeechRecognition;
+    
+    if (SpeechRecognitionAPI) {
+        const recognition = new SpeechRecognitionAPI();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = userLanguage === 'French' ? 'fr-FR' : userLanguage === 'Spanish' ? 'es-ES' : 'en-US';
+        
+        recognition.onstart = () => setIsListening(true);
+        recognition.onend = () => setIsListening(false);
+        recognition.onresult = (event: any) => {
+            const transcript = event.results[0][0].transcript;
+            setLiveContext(transcript);
+        };
+        recognition.onerror = (e: any) => {
+            console.error("Speech recognition error", e);
+            setIsListening(false);
+        };
+        recognitionRef.current = recognition;
+    }
+
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
-      window.speechSynthesis.cancel(); // Stop speaking on unmount
+      window.speechSynthesis.cancel();
+      if (recognitionRef.current) recognitionRef.current.abort();
     };
-  }, []);
+  }, [userLanguage]);
+
+  const toggleListening = () => {
+      if (!recognitionRef.current) {
+          alert("Voice commands not supported in this browser.");
+          return;
+      }
+      if (isListening) {
+          recognitionRef.current.stop();
+      } else {
+          recognitionRef.current.start();
+      }
+  };
 
   // Timer Logic
   useEffect(() => {
@@ -94,18 +140,14 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     return () => clearInterval(timer);
   }, [isRecording]);
 
-  // TTS Logic with Natural Voice Selection
+  // TTS Logic
   useEffect(() => {
     if (!isVoiceEnabled || !currentSuggestion || !isRecording) return;
-
     if (!('speechSynthesis' in window)) return;
 
-    // Cancel previous speech to avoid queue buildup
     window.speechSynthesis.cancel();
-
     const utterance = new SpeechSynthesisUtterance(currentSuggestion);
     
-    // Map user language to BCP 47 tags
     let langTag = 'en-US';
     switch (userLanguage) {
         case 'Spanish': langTag = 'es-ES'; break;
@@ -114,7 +156,6 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     }
     utterance.lang = langTag;
 
-    // Smart Voice Selection: Prefer "Google", "Natural", or "Premium" voices
     const preferredVoice = availableVoices.find(v => 
         v.lang.startsWith(langTag.split('-')[0]) && (
             v.name.includes('Google') || 
@@ -128,24 +169,21 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
         utterance.voice = preferredVoice;
     }
 
-    // Persona-based Tone Adjustment
     if (mentor.id.includes('yoga')) {
-        utterance.rate = 0.85; // Slower
-        utterance.pitch = 0.9; // Calmer/Lower
+        utterance.rate = 0.85; 
+        utterance.pitch = 0.9; 
     } else if (mentor.id.includes('tag_team')) {
-        utterance.rate = 1.2; // Faster
-        utterance.pitch = 1.1; // Higher energy
+        utterance.rate = 1.2; 
+        utterance.pitch = 1.1; 
     } else if (mentor.id.includes('debate')) {
-        utterance.rate = 1.0; // Clear/Standard
+        utterance.rate = 1.0; 
         utterance.pitch = 1.0;
     } else {
-        // Default conversational
         utterance.rate = 1.05; 
         utterance.pitch = 1.0;
     }
 
     window.speechSynthesis.speak(utterance);
-
   }, [currentSuggestion, isVoiceEnabled, isRecording, userLanguage, availableVoices, mentor.id]);
 
   const captureFrame = useCallback(() => {
@@ -158,7 +196,6 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     
-    // Downscale for performance/API limits
     const MAX_WIDTH = 1024;
     const scale = Math.min(1, MAX_WIDTH / canvas.width);
     if (scale < 1) {
@@ -169,7 +206,7 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
        ctx.drawImage(video, 0, 0);
     }
 
-    return canvas.toDataURL('image/jpeg', 0.6).split(',')[1]; // Base64 without prefix
+    return canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
   }, []);
 
   const performAnalysis = useCallback(async () => {
@@ -177,9 +214,8 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     if (!frame) return;
 
     try {
-      const point = await analyzeFrame(frame, mentor, userLanguage);
+      const point = await analyzeFrame(frame, mentor, userLanguage, liveContext);
       
-      // Safety Check
       if (point.safetyStatus === SafetyStatus.UNSAFE) {
         handleUnsafeContent();
         return;
@@ -191,15 +227,11 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
     } catch (err) {
       console.error("Analysis tick failed", err);
     }
-  }, [captureFrame, mentor, userLanguage]);
+  }, [captureFrame, mentor, userLanguage, liveContext]);
 
-  // Analysis Loop
   useEffect(() => {
     if (!isRecording) return;
-    
-    // Initial analysis
     performAnalysis();
-
     const interval = setInterval(performAnalysis, ANALYSIS_INTERVAL);
     return () => clearInterval(interval);
   }, [isRecording, performAnalysis]);
@@ -225,8 +257,7 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
         mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
-    setError("SAFETY ALERT: Toxic or unsafe content detected. Session terminated immediately. This incident has been flagged.");
-    // In a real app, we would block the user account here.
+    setError("SAFETY ALERT: Toxic or unsafe content detected. Session terminated immediately.");
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
     }
@@ -241,20 +272,18 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
         const blob = new Blob(chunksRef.current, { type: 'video/webm' });
         const reportId = crypto.randomUUID();
         
-        // Save Video
         try {
           await saveVideoBlob(reportId, blob);
         } catch (e) {
-          console.warn("Could not save video blob (likely storage limit):", e);
+          console.warn("Could not save video blob:", e);
         }
 
-        // Generate Final Report
         const { keyInsights, overallScore } = await generateFinalSummary(analysisPoints, mentor, userLanguage);
 
         const report: SessionReport = {
           id: reportId,
           userId,
-          startTime: Date.now() - (SESSION_DURATION - timeLeft * 1000), // Approx
+          startTime: Date.now() - (SESSION_DURATION - timeLeft * 1000), 
           endTime: Date.now(),
           durationSeconds: SESSION_DURATION / 1000 - timeLeft,
           activityType: mentor.name,
@@ -296,7 +325,6 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
 
   return (
     <div className="relative h-full flex flex-col bg-black overflow-hidden rounded-xl border border-gray-800">
-      {/* Video Feed */}
       <video
         ref={videoRef}
         autoPlay
@@ -306,7 +334,7 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
       />
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Overlay HUD */}
+      {/* HUD */}
       <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start bg-gradient-to-b from-black/70 to-transparent pointer-events-none">
         <div className="flex items-center space-x-2">
           <div className={`w-3 h-3 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
@@ -316,7 +344,18 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
         </div>
         
         <div className="flex items-center space-x-3 pointer-events-auto">
-             {/* Voice Toggle */}
+             {/* Speech to Text Toggle */}
+             <button 
+                onClick={toggleListening}
+                className={`p-2 rounded-full backdrop-blur-md border transition-colors flex items-center justify-center ${
+                    isListening ? 'bg-red-500/80 border-red-500 text-white animate-pulse' : 'bg-black/40 border-gray-600 text-gray-400'
+                }`}
+                title={isListening ? "Listening... Click to stop" : "Speak Instruction"}
+             >
+                {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+             </button>
+
+             {/* TTS Toggle */}
              <button 
                 onClick={() => setIsVoiceEnabled(!isVoiceEnabled)}
                 className={`p-2 rounded-full backdrop-blur-md border transition-colors ${isVoiceEnabled ? 'bg-primary/80 border-primary text-white' : 'bg-black/40 border-gray-600 text-gray-400'}`}
@@ -338,6 +377,14 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
       {isRecording && (
         <div className="absolute bottom-24 left-4 right-4 animate-fade-in pointer-events-none">
           <div className="bg-black/60 backdrop-blur-md border border-primary/30 p-4 rounded-lg shadow-xl max-w-xl mx-auto">
+            {/* Show User's Spoken Instruction */}
+            {liveContext && (
+                <div className="mb-3 bg-white/10 p-2 rounded border border-white/20 flex items-center justify-between">
+                    <span className="text-xs text-gray-300 italic">You: "{liveContext}"</span>
+                    <button onClick={() => setLiveContext('')} className="pointer-events-auto text-xs text-gray-400 hover:text-white ml-2">Clear</button>
+                </div>
+            )}
+
             <div className="flex items-start space-x-3">
               <div className="bg-primary/20 p-2 rounded-full flex-shrink-0">
                 <Zap className="w-5 h-5 text-primary" />
