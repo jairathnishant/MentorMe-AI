@@ -1,4 +1,5 @@
 
+
 export interface User {
   id: string;
   firstName: string;
@@ -35,6 +36,7 @@ export interface AnalysisPoint {
   suggestion: string;
   goodPoints?: string[]; // What is going well
   improvements?: string[]; // What needs fixing
+  detectedActivity?: string;
 }
 
 export interface SessionReport {

@@ -1,3 +1,4 @@
+
 # MentorMe AI
 
 MentorMe AI is an intelligent, edge-first personal coaching application designed to analyze your workflow, posture, and environment in real-time. Whether you are working, exercising, or presenting, MentorMe provides actionable, human-like audio and visual feedback to help you improve.
@@ -67,6 +68,7 @@ MentorMe AI is an intelligent, edge-first personal coaching application designed
 
 ### 1. Onboarding
 - Sign up using a valid `@gmail.com` address.
+- Enter the demo OTP: `123456`.
 - Create your profile (First Name and Preferred Language).
   - *Supported Languages*: English, Spanish, French.
 

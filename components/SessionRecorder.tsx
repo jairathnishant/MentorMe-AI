@@ -95,8 +95,18 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
             const transcript = event.results[0][0].transcript;
             setLiveContext(transcript);
         };
-        recognition.onerror = (e: any) => {
-            console.error("Speech recognition error", e);
+        recognition.onerror = (event: any) => {
+             // Handle specific error codes
+            if (event.error === 'no-speech') {
+                setIsListening(false);
+                return;
+            }
+            if (event.error === 'not-allowed') {
+                console.warn("Microphone access denied for speech recognition.");
+                setIsListening(false);
+                return;
+            }
+            console.error("Speech recognition error:", event.error);
             setIsListening(false);
         };
         recognitionRef.current = recognition;
@@ -142,10 +152,14 @@ export const SessionRecorder: React.FC<SessionRecorderProps> = ({ mentor, userId
 
   // TTS Logic
   useEffect(() => {
-    if (!isVoiceEnabled || !currentSuggestion || !isRecording) return;
     if (!('speechSynthesis' in window)) return;
 
+    // Always cancel any ongoing speech immediately when dependencies change (e.g., toggling off, new suggestion)
     window.speechSynthesis.cancel();
+
+    // If disabled or not recording, we stop here (after having cancelled)
+    if (!isVoiceEnabled || !currentSuggestion || !isRecording) return;
+
     const utterance = new SpeechSynthesisUtterance(currentSuggestion);
     
     let langTag = 'en-US';

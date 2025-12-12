@@ -35,48 +35,23 @@ Object.defineProperty(window, 'SpeechSynthesisUtterance', {
 global.URL.createObjectURL = vi.fn(() => 'blob:mock-url');
 global.URL.revokeObjectURL = vi.fn();
 
-// Mock IndexedDB (simulate async onsuccess behavior)
+// Mock IndexedDB (Simple mock for generic calls)
 const indexedDBMock = {
-  open: vi.fn().mockImplementation(() => {
-    const result = {
-      objectStoreNames: { contains: vi.fn().mockReturnValue(false) },
+  open: vi.fn().mockReturnValue({
+    result: {
+      objectStoreNames: { contains: vi.fn() },
       createObjectStore: vi.fn(),
       transaction: vi.fn().mockReturnValue({
         objectStore: vi.fn().mockReturnValue({
-          put: vi.fn().mockImplementation(() => {
-            const r: any = {};
-            // simulate async success
-            setTimeout(() => r.onsuccess && r.onsuccess(), 0);
-            return r;
-          }),
-          get: vi.fn().mockImplementation(() => {
-            const r: any = {};
-            setTimeout(() => r.onsuccess && r.onsuccess(), 0);
-            return r;
-          }),
-          delete: vi.fn().mockImplementation(() => {
-            const r: any = {};
-            setTimeout(() => r.onsuccess && r.onsuccess(), 0);
-            return r;
-          }),
+          put: vi.fn().mockReturnValue({ onsuccess: null, onerror: null }),
+          get: vi.fn().mockReturnValue({ onsuccess: null, onerror: null }),
+          delete: vi.fn().mockReturnValue({ onsuccess: null, onerror: null }),
         }),
       }),
-    };
-
-    const req: any = {
-      result,
-      onerror: null,
-      onupgradeneeded: null,
-    };
-
-    // When callers set request.onsuccess, invoke that function asynchronously
-    Object.defineProperty(req, 'onsuccess', {
-      set(fn: any) {
-        setTimeout(() => fn && fn(), 0);
-      },
-    });
-
-    return req;
+    },
+    onsuccess: null,
+    onerror: null,
+    onupgradeneeded: null,
   }),
 };
 Object.defineProperty(window, 'indexedDB', {

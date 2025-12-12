@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Monitor, X, Zap, AlertTriangle, Eye, ArrowRight, AppWindow, Layout, Volume2, VolumeX, CheckCircle, Flame, Users, Mic, MicOff } from 'lucide-react';
+import { Monitor, X, AlertTriangle, ArrowRight, Volume2, VolumeX, CheckCircle, Flame, Users, Mic, MicOff, Activity, AppWindow, Layout } from 'lucide-react';
 import { Button } from './Button';
 import { AnalysisPoint, SafetyStatus, Mentor } from '../types';
 import { analyzeFrame } from '../services/geminiService';
@@ -11,7 +11,7 @@ interface CoCreatorSessionProps {
   onClose: () => void;
 }
 
-const ANALYSIS_INTERVAL = 10000; // Analyze every 10 seconds for co-creation
+const ANALYSIS_INTERVAL = 10000; // Analyze every 10 seconds normally
 
 // Type definition for SpeechRecognition
 interface IWindow extends Window {
@@ -26,6 +26,7 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
 
   const [isLive, setIsLive] = useState(false);
   const [currentSuggestion, setCurrentSuggestion] = useState<string>("Ready to connect...");
+  const [currentActivity, setCurrentActivity] = useState<string>("Waiting for screen share...");
   const [lastAnalysis, setLastAnalysis] = useState<AnalysisPoint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
@@ -41,16 +42,73 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
   useEffect(() => {
     const loadVoices = () => {
         const voices = window.speechSynthesis.getVoices();
-        if (voices.length > 0) {
-            setAvailableVoices(voices);
-        }
+        if (voices.length > 0) setAvailableVoices(voices);
     };
-    
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
-    
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
+
+  // Capture Frame Logic (Moved up to be accessible by performAnalysis)
+  const captureFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    
+    // Check if video has data
+    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+        return null;
+    }
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    // Increased max width to 1920 for better text readability on screen shares
+    const MAX_WIDTH = 1920; 
+    const scale = Math.min(1, MAX_WIDTH / canvas.width);
+    
+    if (scale < 1) {
+       canvas.width = Math.floor(canvas.width * scale);
+       canvas.height = Math.floor(canvas.height * scale);
+       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } else {
+       ctx.drawImage(video, 0, 0);
+    }
+
+    return canvas.toDataURL('image/jpeg', 0.7).split(',')[1]; 
+  }, []);
+
+  // Analysis Logic
+  const performAnalysis = useCallback(async (manualContext?: string) => {
+    const frame = captureFrame();
+    if (!frame) return;
+
+    try {
+      setIsAnalyzing(true);
+      // Use manual context (from immediate speech) or stored liveContext
+      const contextToSend = manualContext !== undefined ? manualContext : liveContext;
+      
+      const point = await analyzeFrame(frame, mentor, userLanguage, contextToSend);
+      setIsAnalyzing(false);
+      
+      if (point.safetyStatus === SafetyStatus.UNSAFE) {
+        handleStop();
+        setError("SAFETY ALERT: The AI detected unsafe content. Session terminated.");
+        return;
+      }
+
+      setLastAnalysis(point);
+      setCurrentSuggestion(point.suggestion);
+      if (point.detectedActivity) {
+          setCurrentActivity(point.detectedActivity);
+      }
+    } catch (err) {
+      console.error("Co-creation analysis failed", err);
+      setIsAnalyzing(false);
+    }
+  }, [captureFrame, mentor, userLanguage, liveContext]);
 
   // Initialize Speech Rec
   useEffect(() => {
@@ -68,9 +126,25 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
         recognition.onresult = (event: any) => {
             const transcript = event.results[0][0].transcript;
             setLiveContext(transcript);
+            // TRIGGER IMMEDIATE ANALYSIS ON VOICE INPUT
+            if (isLive) {
+                performAnalysis(transcript);
+            }
         };
-        recognition.onerror = (e: any) => {
-            console.error("Speech error", e);
+        recognition.onerror = (event: any) => {
+            // Handle specific error codes
+            if (event.error === 'no-speech') {
+                // User didn't say anything, just stop listening silently
+                setIsListening(false);
+                return;
+            }
+            if (event.error === 'not-allowed') {
+                console.warn("Microphone access denied for speech recognition.");
+                setIsListening(false);
+                return;
+            }
+            
+            console.error("Speech recognition error:", event.error);
             setIsListening(false);
         };
         recognitionRef.current = recognition;
@@ -78,7 +152,7 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
     return () => {
         if (recognitionRef.current) recognitionRef.current.abort();
     };
-  }, [userLanguage]);
+  }, [userLanguage, isLive, performAnalysis]);
 
   const toggleListening = () => {
       if (!recognitionRef.current) return;
@@ -86,12 +160,15 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
       else recognitionRef.current.start();
   };
 
-  // TTS Logic with Natural Voice Selection
+  // TTS Logic
   useEffect(() => {
-    if (!isVoiceEnabled || !currentSuggestion || !isLive) return;
     if (!('speechSynthesis' in window)) return;
-
+    
+    // Always cancel immediately if things change or voice is disabled
     window.speechSynthesis.cancel();
+
+    if (!isVoiceEnabled || !currentSuggestion || !isLive) return;
+
     const utterance = new SpeechSynthesisUtterance(currentSuggestion);
     
     let langTag = 'en-US';
@@ -102,30 +179,20 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
     }
     utterance.lang = langTag;
 
-     // Smart Voice Selection: Prefer "Google", "Natural", or "Premium"
-     const preferredVoice = availableVoices.find(v => 
+    const preferredVoice = availableVoices.find(v => 
         v.lang.startsWith(langTag.split('-')[0]) && (
-            v.name.includes('Google') || 
-            v.name.includes('Natural') || 
-            v.name.includes('Premium') ||
-            v.name.includes('Enhanced')
+            v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Premium')
         )
     ) || availableVoices.find(v => v.lang.startsWith(langTag.split('-')[0]));
 
-    if (preferredVoice) {
-        utterance.voice = preferredVoice;
-    }
+    if (preferredVoice) utterance.voice = preferredVoice;
 
-    // Persona-based Tone
     if (mentor.id.includes('coworker')) {
-        utterance.rate = 1.05; // Professional/Efficient
-        utterance.pitch = 1.0;
+        utterance.rate = 1.05; utterance.pitch = 1.0;
     } else if (mentor.id.includes('tag_team')) {
-        utterance.rate = 1.2; // Energetic/Fast
-        utterance.pitch = 1.1; 
+        utterance.rate = 1.2; utterance.pitch = 1.1; 
     } else {
-        utterance.rate = 1.1; // Default helpful AI
-        utterance.pitch = 1.0;
+        utterance.rate = 1.1; utterance.pitch = 1.0;
     }
     
     window.speechSynthesis.speak(utterance);
@@ -134,107 +201,41 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
   const startScreenShare = async (preferredSurface?: 'monitor' | 'window' | 'browser') => {
     try {
       setError(null);
-      
-      const videoConstraints: any = {
-        cursor: "always"
-      };
+      const videoConstraints: any = { cursor: "always" };
+      if (preferredSurface) videoConstraints.displaySurface = preferredSurface;
 
-      if (preferredSurface) {
-        videoConstraints.displaySurface = preferredSurface;
-      }
-
-      const displayMediaOptions = {
-          video: videoConstraints,
-          audio: false 
-      };
-      
-      const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false });
       
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        // Don't call play() immediately, wait for onloadedmetadata
+        // Important: Wait for metadata to ensure dimensions are ready
+        videoRef.current.onloadedmetadata = () => {
+             videoRef.current?.play();
+             // Initial analysis after a short delay to let screen render
+             setTimeout(() => performAnalysis(), 2000);
+        };
       }
       
       setIsLive(true);
-      setCurrentSuggestion(`Connected to ${mentor.name}. I'm watching your screen now.`);
-
-      stream.getVideoTracks()[0].onended = () => {
-          handleStop();
-      };
+      setCurrentSuggestion(`Connected. I'm watching your screen.`);
+      
+      stream.getVideoTracks()[0].onended = () => handleStop();
 
     } catch (err: any) {
       console.error("Screen share error:", err);
       if (err instanceof DOMException && err.name === "NotAllowedError") {
-         if (err.message.includes("permissions policy")) {
-             setError("Screen sharing is disabled by the hosting environment. This feature requires the 'display-capture' permission.");
-         } else {
-             setError("Permission denied or cancelled. Please try again.");
-         }
+         setError("Permission cancelled.");
       } else {
-         setError("Could not start screen share. Please check browser permissions.");
+         setError("Could not start screen share.");
       }
     }
   };
 
-  const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return null;
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    
-    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    
-    // Downscale for performance/API limits
-    const MAX_WIDTH = 1024;
-    const scale = Math.min(1, MAX_WIDTH / canvas.width);
-    if (scale < 1) {
-       canvas.width = canvas.width * scale;
-       canvas.height = canvas.height * scale;
-       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    } else {
-       ctx.drawImage(video, 0, 0);
-    }
-
-    return canvas.toDataURL('image/jpeg', 0.5).split(',')[1]; 
-  }, []);
-
-  const performAnalysis = useCallback(async () => {
-    const frame = captureFrame();
-    if (!frame) return;
-
-    try {
-      setIsAnalyzing(true);
-      const point = await analyzeFrame(frame, mentor, userLanguage, liveContext);
-      setIsAnalyzing(false);
-      
-      if (point.safetyStatus === SafetyStatus.UNSAFE) {
-        handleStop();
-        setError("SAFETY ALERT: The AI detected unsafe content on your screen. Session terminated.");
-        return;
-      }
-
-      setLastAnalysis(point);
-      setCurrentSuggestion(point.suggestion);
-    } catch (err) {
-      console.error("Co-creation analysis failed", err);
-      setIsAnalyzing(false);
-      setCurrentSuggestion("Re-calibrating visual feed...");
-    }
-  }, [captureFrame, mentor, userLanguage, liveContext]);
-
   useEffect(() => {
     if (!isLive) return;
-    const timeout = setTimeout(performAnalysis, 3000); 
-    const interval = setInterval(performAnalysis, ANALYSIS_INTERVAL);
-    return () => {
-        clearInterval(interval);
-        clearTimeout(timeout);
-    };
+    const interval = setInterval(() => performAnalysis(), ANALYSIS_INTERVAL);
+    return () => clearInterval(interval);
   }, [isLive, performAnalysis]);
 
   const handleStop = () => {
@@ -270,17 +271,18 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
                 <Monitor className="w-5 h-5 text-primary" />
             </div>
             <div>
-                <h3 className="font-bold text-white text-sm">Screen Share: {mentor.name}</h3>
-                <p className="text-xs text-gray-400">Edge Computing Mode • No Recording Stored</p>
+                <h3 className="font-bold text-white text-sm">{mentor.name}</h3>
+                <p className="text-xs text-gray-400">Live Screen Analysis</p>
             </div>
          </div>
          <div className="flex items-center space-x-2">
             <button 
                 onClick={toggleListening}
-                className={`p-2 rounded-full border transition-colors ${isListening ? 'bg-red-500 text-white border-red-500 animate-pulse' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
-                title="Voice Command"
+                className={`p-2 rounded-full border transition-colors flex items-center ${isListening ? 'bg-red-500 text-white border-red-500 animate-pulse' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+                title="Talk to Mentor"
             >
-                {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                {isListening ? <Mic className="w-4 h-4 mr-2" /> : <MicOff className="w-4 h-4 mr-2" />}
+                <span className="text-xs font-bold hidden md:inline">{isListening ? 'Listening...' : 'Talk Back'}</span>
             </button>
 
             <button 
@@ -296,65 +298,80 @@ export const CoCreatorSession: React.FC<CoCreatorSessionProps> = ({ mentor, user
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex items-center justify-center p-4 pt-20 pb-24 bg-black relative">
+      <div className="flex-1 flex items-center justify-center p-4 pt-20 pb-32 bg-black relative">
          {!isLive ? (
-             <div className="text-center p-8 max-w-lg w-full">
-                 <div className="w-20 h-20 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-6">
-                    <Monitor className="w-10 h-10 text-gray-400" />
+             <div className="text-center p-8 max-w-2xl w-full animate-fade-in">
+                 <div className="w-20 h-20 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-6 shadow-2xl">
+                    <Monitor className="w-10 h-10 text-primary" />
                  </div>
-                 <h2 className="text-2xl font-bold text-white mb-2">Share Source</h2>
-                 <p className="text-gray-400 mb-8">
-                    Select the screen or window for the <span className="text-primary">{mentor.name}</span> to analyze.
+                 <h2 className="text-3xl font-bold text-white mb-2">Ready to Collaborate</h2>
+                 <p className="text-gray-400 mb-8 max-w-md mx-auto">
+                    You have selected <span className="text-primary font-bold">{mentor.name}</span>. 
+                    <br/>
+                    <span className="text-sm italic opacity-80">"{mentor.goals}"</span>
                  </p>
                  
-                 <div className="grid grid-cols-1 gap-3 w-full">
-                    <Button onClick={() => startScreenShare('monitor')} size="lg" className="w-full justify-between group h-14 bg-gray-800 hover:bg-gray-700 border-gray-700">
-                        <span className="flex items-center"><Monitor className="w-5 h-5 mr-3 text-purple-500" /> Assess video/image</span>
-                        <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-white transition-colors" />
+                 <div className="flex flex-col space-y-4 max-w-md mx-auto">
+                    <Button onClick={() => startScreenShare('monitor')} size="xl" className="w-full h-16 text-lg shadow-primary/25">
+                        <Monitor className="w-6 h-6 mr-3" /> Start Screen Share
                     </Button>
-                    <Button onClick={() => startScreenShare('monitor')} size="lg" className="w-full justify-between group h-14 bg-gray-800 hover:bg-gray-700 border-gray-700">
-                         <span className="flex items-center"><Users className="w-5 h-5 mr-3 text-blue-500" /> Co-Worker</span>
-                         <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-white transition-colors" />
-                    </Button>
-                    <Button onClick={() => startScreenShare('monitor')} size="lg" className="w-full justify-between group h-14 bg-gray-800 hover:bg-gray-700 border-gray-700">
-                         <span className="flex items-center"><Flame className="w-5 h-5 mr-3 text-red-500" /> Tag-Team Player</span>
-                         <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-white transition-colors" />
-                    </Button>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                        <Button onClick={() => startScreenShare('window')} variant="secondary" className="h-12 border-gray-700 hover:border-gray-500">
+                             <AppWindow className="w-4 h-4 mr-2 text-blue-400" /> Share Window
+                        </Button>
+                        <Button onClick={() => startScreenShare('browser')} variant="secondary" className="h-12 border-gray-700 hover:border-gray-500">
+                             <Layout className="w-4 h-4 mr-2 text-orange-400" /> Share Tab
+                        </Button>
+                    </div>
+                    <p className="text-xs text-gray-600 mt-4">
+                        Your screen is analyzed locally in your browser. No video is permanently stored.
+                    </p>
                  </div>
              </div>
          ) : (
-            <video
-                ref={videoRef}
-                autoPlay
-                muted
-                playsInline
-                onLoadedMetadata={(e) => {
-                    e.currentTarget.play();
-                }}
-                className="max-w-full max-h-full rounded-lg shadow-2xl border border-gray-700"
-            />
+            <>
+                <video
+                    ref={videoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="max-w-full max-h-full rounded-lg shadow-2xl border border-gray-700"
+                />
+                
+                {/* Current Activity Overlay (Top Center) */}
+                <div className="absolute top-24 bg-black/70 backdrop-blur-md border border-gray-600 rounded-full px-4 py-2 flex items-center shadow-lg animate-fade-in">
+                    <Activity className="w-4 h-4 text-green-400 mr-2 animate-pulse" />
+                    <span className="text-white text-sm font-medium">
+                        {isAnalyzing ? "Analyzing Frame..." : `Detecting: ${currentActivity}`}
+                    </span>
+                </div>
+            </>
          )}
       </div>
       <canvas ref={canvasRef} className="hidden" />
 
       {/* Floating Ticker Chat at Bottom */}
-      <div className="absolute bottom-0 left-0 right-0 h-20 bg-black/80 backdrop-blur-md border-t border-gray-800 flex items-center overflow-hidden z-20">
+      <div className="absolute bottom-0 left-0 right-0 h-24 bg-black/80 backdrop-blur-md border-t border-gray-800 flex items-center overflow-hidden z-20">
           <div className="flex-shrink-0 px-6 bg-black h-full flex items-center z-10 border-r border-gray-800">
               <div className="flex flex-col w-24">
                   <span className="text-xs text-primary font-bold uppercase tracking-wider">Mentor Stream</span>
-                  {isAnalyzing && <span className="text-[10px] text-yellow-500 animate-pulse">Thinking...</span>}
-                  {!isAnalyzing && <span className="text-[10px] text-green-500">Live</span>}
+                  {isAnalyzing ? (
+                      <span className="text-[10px] text-yellow-500 animate-pulse font-mono mt-1">Thinking...</span>
+                  ) : (
+                      <span className="text-[10px] text-green-500 font-mono mt-1">Connected</span>
+                  )}
               </div>
           </div>
           
           <div className="flex-1 overflow-hidden relative h-full flex items-center bg-black/50">
              {liveContext ? (
                  <div className="absolute inset-0 flex items-center justify-center bg-primary/20 px-4 animate-fade-in z-20">
-                     <span className="text-white italic">You: "{liveContext}"</span>
-                     <button onClick={() => setLiveContext('')} className="ml-4 text-xs text-gray-300 underline">Clear Context</button>
+                     <span className="text-white italic text-lg">You: "{liveContext}"</span>
+                     <button onClick={() => setLiveContext('')} className="ml-4 text-xs text-gray-300 underline">Clear</button>
                  </div>
              ) : (
-                <div className="whitespace-nowrap animate-marquee text-lg text-white font-medium pl-4">
+                <div className="whitespace-nowrap animate-marquee text-xl text-white font-medium pl-4 leading-relaxed">
                     {currentSuggestion}
                 </div>
              )}
